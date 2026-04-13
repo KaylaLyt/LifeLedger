@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": 1775721600000,
+  "accounts": [
+    {
+      "id": 1,
+      "name": "招商银行卡",
+      "type": "银行卡",
+      "accountNumber": "6225888888888888",
+      "note": "工资卡",
+      "includeInNetWorth": true
+    }
+  ],
+  "snapshots": [
+    {
+      "id": 10,
+      "snapshotDate": 1773033600000,
+      "createdAt": 1773033900000,
+      "nextRecordAt": 1780896000000,
+      "targetTotalInCents": 120000000,
+      "debtLabel": "备用负债记录",
+      "debtAmountInCents": 0,
+      "note": "第一季度补录",
+      "balances": [
+        {
+          "accountId": 1,
+          "amountInCents": 9850000
+        }
+      ],
+      "expenses": [
+        {
+          "categoryName": "房租",
+          "amountInCents": 300000
+        },
+        {
+          "categoryName": "餐饮",
+          "amountInCents": 120000
+        }
+      ]
+    }
+  ],
+  "people": [
+    {
+      "id": 3,
+      "name": "小王",
+      "birthdayMonth": 4,
+      "birthdayDay": 23,
+      "relation": "朋友",
+      "note": "喜欢实用礼物"
+    }
+  ],
+  "giftRecords": [
+    {
+      "id": 8,
+      "personId": 3,
+      "date": 1772860800000,
+      "direction": "SENT",
+      "giftName": "蓝牙耳机",
+      "priceInCents": 39900,
+      "note": "生日礼物"
+    }
+  ],
+  "todos": [
+    {
+      "id": 20,
+      "title": "给小王准备礼物",
+      "description": "生日临近，提前两周准备礼物。",
+      "createdAt": 1771651200000,
+      "isCompleted": false,
+      "dueAt": 1771654800000,
+      "reminderAt": 1771654800000,
+      "nextTriggerAt": 1771654800000,
+      "completedAt": null,
+      "lastCompletedAt": null,
+      "sourceType": "birthday-gift",
+      "sourceRefId": 3,
+      "sourceCycleKey": "2026-3",
+      "recurrence": null
+    }
+  ]
+}

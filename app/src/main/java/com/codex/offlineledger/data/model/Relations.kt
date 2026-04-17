@@ -3,7 +3,6 @@ package com.codex.offlineledger.data.model
 import androidx.room.Embedded
 import androidx.room.Relation
 import com.codex.offlineledger.data.entity.GiftRecordEntity
-import com.codex.offlineledger.data.entity.NoteEntity
 import com.codex.offlineledger.data.entity.PersonEntity
 import com.codex.offlineledger.data.entity.RecurrenceRuleEntity
 import com.codex.offlineledger.data.entity.SnapshotBalanceEntity
@@ -41,16 +40,4 @@ data class TodoWithRule(
         entityColumn = "todoId",
     )
     val rule: RecurrenceRuleEntity?,
-)
-
-data class NoteCategoryWithCount(
-    val id: Long,
-    val name: String,
-    val createdAt: Long,
-    val sortOrder: Int,
-    val noteCount: Int,
-)
-
-data class NoteWithCategory(
-    @Embedded val note: NoteEntity,
 )

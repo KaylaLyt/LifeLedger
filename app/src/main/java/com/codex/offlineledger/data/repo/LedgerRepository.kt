@@ -2,12 +2,14 @@ package com.codex.offlineledger.data.repo
 
 import android.content.Context
 import androidx.room.withTransaction
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.codex.offlineledger.data.AppDatabase
 import com.codex.offlineledger.data.entity.AccountEntity
 import com.codex.offlineledger.data.entity.AppLockSettingsEntity
+import com.codex.offlineledger.data.entity.ExpenseCategoryEntity
 import com.codex.offlineledger.data.entity.GiftDirection
 import com.codex.offlineledger.data.entity.GiftRecordEntity
-import com.codex.offlineledger.data.entity.NoteCategoryEntity
 import com.codex.offlineledger.data.entity.NoteEntity
 import com.codex.offlineledger.data.entity.PersonEntity
 import com.codex.offlineledger.data.entity.RecurrenceMode
@@ -15,17 +17,22 @@ import com.codex.offlineledger.data.entity.RecurrenceRuleEntity
 import com.codex.offlineledger.data.entity.SnapshotBalanceEntity
 import com.codex.offlineledger.data.entity.SnapshotEntity
 import com.codex.offlineledger.data.entity.SnapshotExpenseEntity
+import com.codex.offlineledger.data.entity.SnapshotTagCrossRef
+import com.codex.offlineledger.data.entity.TagEntity
 import com.codex.offlineledger.data.entity.TodoEntity
 import com.codex.offlineledger.data.model.ExportAccount
 import com.codex.offlineledger.data.model.ExportBundle
+import com.codex.offlineledger.data.model.ExportExpenseCategory
 import com.codex.offlineledger.data.model.ExportGiftRecord
+import com.codex.offlineledger.data.model.ExportLock
 import com.codex.offlineledger.data.model.ExportNote
-import com.codex.offlineledger.data.model.ExportNoteCategory
 import com.codex.offlineledger.data.model.ExportPerson
 import com.codex.offlineledger.data.model.ExportRecurrenceRule
 import com.codex.offlineledger.data.model.ExportSnapshot
 import com.codex.offlineledger.data.model.ExportSnapshotBalance
 import com.codex.offlineledger.data.model.ExportSnapshotExpense
+import com.codex.offlineledger.data.model.ExportSnapshotTag
+import com.codex.offlineledger.data.model.ExportTag
 import com.codex.offlineledger.data.model.ExportTodo
 import com.codex.offlineledger.domain.LedgerLogic
 import com.codex.offlineledger.domain.LockAction
@@ -35,8 +42,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
 import java.io.InputStream
 import java.io.OutputStream
-import java.time.LocalDate
-import java.time.ZoneId
 
 class LedgerRepository(
     private val database: AppDatabase,
@@ -44,11 +49,37 @@ class LedgerRepository(
     private val dao = database.ledgerDao()
     private val json = Json { prettyPrint = true }
 
-    val accounts: Flow<List<AccountEntity>> = dao.observeAccounts()
+    val accounts: Flow<List<AccountEntity>> = dao.observeActiveAccounts()
+    val allAccounts: Flow<List<AccountEntity>> = dao.observeAccounts()
     val snapshots = dao.observeSnapshots()
     val people = dao.observePeopleWithGifts()
     val todos = dao.observeTodos()
     val lockSettings = dao.observeAppLockSettings()
+    val activeCategories = dao.observeActiveCategories()
+    val allCategories = dao.observeAllCategories()
+    val notes = dao.observeNotes()
+    val activeTags: Flow<List<TagEntity>> = dao.observeActiveTags()
+    val allTags: Flow<List<TagEntity>> = dao.observeAllTags()
+    val snapshotTagJoin = dao.observeSnapshotTagJoin()
+
+    // --- Accounts ---
+
+    sealed class AccountNameStatus {
+        data object Available : AccountNameStatus()
+        data object ConflictActive : AccountNameStatus()
+        data class ConflictArchived(val id: Long) : AccountNameStatus()
+    }
+
+    suspend fun checkAccountNameAvailability(name: String): AccountNameStatus {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return AccountNameStatus.Available
+        val existing = dao.getAccountByNameIgnoreCase(trimmed) ?: return AccountNameStatus.Available
+        return if (existing.archived) {
+            AccountNameStatus.ConflictArchived(existing.id)
+        } else {
+            AccountNameStatus.ConflictActive
+        }
+    }
 
     suspend fun saveAccount(
         name: String,
@@ -56,71 +87,317 @@ class LedgerRepository(
         accountNumber: String,
         note: String,
         includeInNetWorth: Boolean,
-    ) {
-        dao.upsertAccount(
+    ): Result<Long> {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return Result.failure(IllegalArgumentException("账户名不能为空"))
+        val existing = dao.getAccountByNameIgnoreCase(trimmed)
+        if (existing != null) {
+            if (existing.archived) {
+                return Result.failure(
+                    AccountArchivedConflict(existing.id, existing.name),
+                )
+            }
+            return Result.failure(IllegalArgumentException("已存在同名账户"))
+        }
+        val id = dao.upsertAccount(
             AccountEntity(
-                name = name.trim(),
+                name = trimmed,
                 type = type.trim(),
                 accountNumber = accountNumber.trim(),
                 note = note.trim(),
                 includeInNetWorth = includeInNetWorth,
             ),
         )
+        return Result.success(id)
     }
+
+    suspend fun updateAccount(
+        id: Long,
+        name: String,
+        type: String,
+        accountNumber: String,
+        note: String,
+        includeInNetWorth: Boolean,
+    ): Result<Unit> {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return Result.failure(IllegalArgumentException("账户名不能为空"))
+        val conflict = dao.getAccountByNameIgnoreCase(trimmed)
+        if (conflict != null && conflict.id != id) {
+            return Result.failure(IllegalArgumentException("已存在同名账户"))
+        }
+        val existing = dao.getAccounts().firstOrNull { it.id == id }
+            ?: return Result.failure(IllegalArgumentException("账户不存在"))
+        dao.updateAccount(
+            existing.copy(
+                name = trimmed,
+                type = type.trim(),
+                accountNumber = accountNumber.trim(),
+                note = note.trim(),
+                includeInNetWorth = includeInNetWorth,
+            ),
+        )
+        return Result.success(Unit)
+    }
+
+    suspend fun archiveAccount(id: Long) {
+        dao.setAccountArchived(id, true)
+    }
+
+    suspend fun unarchiveAccount(id: Long) {
+        dao.setAccountArchived(id, false)
+    }
+
+    suspend fun restoreAndUpdateAccount(
+        id: Long,
+        name: String,
+        type: String,
+        accountNumber: String,
+        note: String,
+        includeInNetWorth: Boolean,
+    ): Result<Unit> {
+        val existing = dao.getAccounts().firstOrNull { it.id == id }
+            ?: return Result.failure(IllegalArgumentException("账户不存在"))
+        dao.updateAccount(
+            existing.copy(
+                name = name.trim(),
+                type = type.trim(),
+                accountNumber = accountNumber.trim(),
+                note = note.trim(),
+                includeInNetWorth = includeInNetWorth,
+                archived = false,
+            ),
+        )
+        return Result.success(Unit)
+    }
+
+    class AccountArchivedConflict(val id: Long, val name: String) :
+        RuntimeException("已存在同名归档账户")
+
+    // --- Expense Categories ---
+
+    suspend fun saveExpenseCategory(name: String): Result<Long> {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return Result.failure(IllegalArgumentException("名称不能为空"))
+        val existing = dao.getCategoryByName(trimmed)
+        if (existing != null) {
+            if (existing.archived) {
+                dao.updateCategory(existing.copy(archived = false))
+                return Result.success(existing.id)
+            }
+            return Result.failure(IllegalArgumentException("分类已存在"))
+        }
+        if (dao.countActiveCategories() >= 10) {
+            return Result.failure(IllegalArgumentException("花销分类最多 10 个"))
+        }
+        val id = dao.insertCategory(
+            ExpenseCategoryEntity(
+                name = trimmed,
+                sortOrder = (dao.getAllCategories().maxOfOrNull { it.sortOrder } ?: -1) + 1,
+                createdAt = System.currentTimeMillis(),
+            ),
+        )
+        return Result.success(id)
+    }
+
+    suspend fun renameExpenseCategory(id: Long, newName: String): Result<Unit> {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return Result.failure(IllegalArgumentException("名称不能为空"))
+        val category = dao.getAllCategories().firstOrNull { it.id == id }
+            ?: return Result.failure(IllegalArgumentException("分类不存在"))
+        val conflict = dao.getCategoryByName(trimmed)
+        if (conflict != null && conflict.id != id) {
+            return Result.failure(IllegalArgumentException("已存在同名分类"))
+        }
+        dao.updateCategory(category.copy(name = trimmed))
+        return Result.success(Unit)
+    }
+
+    suspend fun archiveExpenseCategory(id: Long) {
+        val category = dao.getAllCategories().firstOrNull { it.id == id } ?: return
+        dao.updateCategory(category.copy(archived = true))
+    }
+
+    // --- Snapshots ---
 
     suspend fun saveSnapshot(
         snapshotDate: Long,
         nextRecordAt: Long?,
-        targetTotalInCents: Long?,
+        targetTotal: Long?,
         debtLabel: String,
-        debtAmountInCents: Long?,
+        debtAmount: Long?,
         note: String,
         balances: List<Pair<Long, Long>>,
-        expenses: List<Pair<String, Long>>,
+        expenses: List<Pair<Long, Long>>,
+        mood: Int? = null,
+        tagIds: List<Long> = emptyList(),
     ) {
-        require(LedgerLogic.validateExpenseCategoryCount(expenses.size)) { "花销分类最多 10 个" }
         database.withTransaction {
             val snapshotId = dao.insertSnapshot(
                 SnapshotEntity(
                     snapshotDate = snapshotDate,
                     createdAt = System.currentTimeMillis(),
                     nextRecordAt = nextRecordAt,
-                    targetTotalInCents = targetTotalInCents,
+                    targetTotal = targetTotal,
                     debtLabel = debtLabel.trim(),
-                    debtAmountInCents = debtAmountInCents,
+                    debtAmount = debtAmount,
                     note = note.trim(),
+                    mood = LedgerLogic.normalizeMood(mood),
                 ),
             )
             dao.insertSnapshotBalances(
-                balances.map { (accountId, amountInCents) ->
+                balances.map { (accountId, amount) ->
                     SnapshotBalanceEntity(
                         snapshotId = snapshotId,
                         accountId = accountId,
-                        amountInCents = amountInCents,
+                        amount = amount,
                     )
                 },
             )
             dao.insertSnapshotExpenses(
-                expenses.map { (categoryName, amountInCents) ->
+                expenses.map { (categoryId, amount) ->
                     SnapshotExpenseEntity(
                         snapshotId = snapshotId,
-                        categoryName = categoryName.trim(),
-                        amountInCents = amountInCents,
+                        categoryId = categoryId,
+                        amount = amount,
                     )
                 },
             )
+            if (tagIds.isNotEmpty()) {
+                dao.insertSnapshotTagRefs(
+                    tagIds.distinct().map {
+                        SnapshotTagCrossRef(snapshotId = snapshotId, tagId = it)
+                    },
+                )
+            }
         }
     }
 
+    suspend fun deleteSnapshot(id: Long) {
+        dao.deleteSnapshot(id)
+    }
+
+    // --- Tags ---
+
+    sealed class TagNameStatus {
+        data object Available : TagNameStatus()
+        data object ConflictActive : TagNameStatus()
+        data class ConflictArchived(val id: Long) : TagNameStatus()
+    }
+
+    class TagInUseException(val referencedBy: Int) :
+        RuntimeException("被 $referencedBy 条快照引用，只能归档")
+
+    suspend fun checkTagNameAvailability(name: String): TagNameStatus {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return TagNameStatus.Available
+        val existing = dao.getTagByNameIgnoreCase(trimmed) ?: return TagNameStatus.Available
+        return if (existing.archived) {
+            TagNameStatus.ConflictArchived(existing.id)
+        } else {
+            TagNameStatus.ConflictActive
+        }
+    }
+
+    suspend fun saveTag(name: String): Result<Long> {
+        val trimmed = name.trim()
+        if (trimmed.isBlank()) return Result.failure(IllegalArgumentException("标签名不能为空"))
+        val existing = dao.getTagByNameIgnoreCase(trimmed)
+        if (existing != null) {
+            if (existing.archived) {
+                dao.setTagArchived(existing.id, false)
+            }
+            return Result.success(existing.id)
+        }
+        val id = dao.insertTag(TagEntity(name = trimmed))
+        return Result.success(id)
+    }
+
+    suspend fun renameTag(id: Long, newName: String): Result<Unit> {
+        val trimmed = newName.trim()
+        if (trimmed.isBlank()) return Result.failure(IllegalArgumentException("标签名不能为空"))
+        val current = dao.getAllTags().firstOrNull { it.id == id }
+            ?: return Result.failure(IllegalArgumentException("标签不存在"))
+        val conflict = dao.getTagByNameIgnoreCase(trimmed)
+        if (conflict != null && conflict.id != id) {
+            return Result.failure(IllegalArgumentException("已存在同名标签"))
+        }
+        dao.updateTag(current.copy(name = trimmed))
+        return Result.success(Unit)
+    }
+
+    suspend fun archiveTag(id: Long) {
+        dao.setTagArchived(id, true)
+    }
+
+    suspend fun unarchiveTag(id: Long) {
+        dao.setTagArchived(id, false)
+    }
+
+    suspend fun deleteTagIfUnused(id: Long): Result<Unit> {
+        val count = dao.countSnapshotTagsByTag(id)
+        if (count > 0) return Result.failure(TagInUseException(count))
+        dao.deleteTagById(id)
+        return Result.success(Unit)
+    }
+
+    suspend fun updateSnapshotAnnotation(
+        snapshotId: Long,
+        mood: Int?,
+        note: String,
+        tagIds: List<Long>,
+    ): Result<Unit> = runCatching {
+        val normalizedMood = LedgerLogic.normalizeMood(mood)
+        val trimmedNote = note.trim()
+        val targetSet = tagIds.distinct().toSet()
+        database.withTransaction {
+            dao.updateSnapshotMoodAndNote(snapshotId, normalizedMood, trimmedNote)
+            val current = dao.getTagIdsForSnapshot(snapshotId).toSet()
+            val toRemove = (current - targetSet).toList()
+            val toAdd = (targetSet - current).toList()
+            if (toRemove.isNotEmpty()) {
+                dao.deleteSnapshotTagRefs(snapshotId, toRemove)
+            }
+            if (toAdd.isNotEmpty()) {
+                dao.insertSnapshotTagRefs(
+                    toAdd.map { SnapshotTagCrossRef(snapshotId = snapshotId, tagId = it) },
+                )
+            }
+        }
+    }
+
+    // --- People ---
+
     suspend fun savePerson(
         name: String,
-        birthdayMonth: Int,
-        birthdayDay: Int,
+        birthdayMonth: Int?,
+        birthdayDay: Int?,
         relation: String,
         note: String,
     ) {
+        val minOrder = dao.getMinPersonSortOrder() ?: 0
         dao.upsertPerson(
             PersonEntity(
+                name = name.trim(),
+                birthdayMonth = birthdayMonth,
+                birthdayDay = birthdayDay,
+                relation = relation.trim(),
+                note = note.trim(),
+                sortOrder = minOrder - 1,
+            ),
+        )
+    }
+
+    suspend fun updatePerson(
+        id: Long,
+        name: String,
+        birthdayMonth: Int?,
+        birthdayDay: Int?,
+        relation: String,
+        note: String,
+    ) {
+        val existing = dao.getPeopleWithGifts().firstOrNull { it.person.id == id } ?: return
+        dao.upsertPerson(
+            existing.person.copy(
                 name = name.trim(),
                 birthdayMonth = birthdayMonth,
                 birthdayDay = birthdayDay,
@@ -130,12 +407,24 @@ class LedgerRepository(
         )
     }
 
+    suspend fun reorderPeople(orderedIds: List<Long>) {
+        val people = dao.getPeopleWithGifts().associate { it.person.id to it.person }
+        val updates = orderedIds.mapIndexedNotNull { index, id ->
+            people[id]?.copy(sortOrder = index)
+        }
+        if (updates.isNotEmpty()) dao.updatePeople(updates)
+    }
+
+    suspend fun deletePerson(id: Long) {
+        dao.deletePerson(id)
+    }
+
     suspend fun saveGiftRecord(
         personId: Long,
         date: Long,
         direction: GiftDirection,
         giftName: String,
-        priceInCents: Long,
+        price: Long,
         note: String,
     ) {
         dao.insertGiftRecord(
@@ -144,11 +433,42 @@ class LedgerRepository(
                 date = date,
                 direction = direction,
                 giftName = giftName.trim(),
-                priceInCents = priceInCents,
+                price = price,
                 note = note.trim(),
             ),
         )
     }
+
+    // --- Notes ---
+
+    suspend fun saveNote(title: String, body: String) {
+        val now = System.currentTimeMillis()
+        dao.insertNote(
+            NoteEntity(
+                title = title.trim(),
+                body = body.trim(),
+                createdAt = now,
+                updatedAt = now,
+            ),
+        )
+    }
+
+    suspend fun updateNote(id: Long, title: String, body: String) {
+        val existing = dao.getNotes().firstOrNull { it.id == id } ?: return
+        dao.updateNote(
+            existing.copy(
+                title = title.trim(),
+                body = body.trim(),
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    suspend fun deleteNote(id: Long) {
+        dao.deleteNote(id)
+    }
+
+    // --- Todos ---
 
     suspend fun saveTodo(
         title: String,
@@ -156,9 +476,6 @@ class LedgerRepository(
         dueAt: Long?,
         reminderAt: Long?,
         recurrence: RecurrenceDescriptor?,
-        sourceType: String? = null,
-        sourceRefId: Long? = null,
-        sourceCycleKey: String? = null,
     ) {
         database.withTransaction {
             val now = System.currentTimeMillis()
@@ -177,9 +494,6 @@ class LedgerRepository(
                     dueAt = dueAt,
                     reminderAt = reminderAt,
                     nextTriggerAt = initialTrigger ?: reminderAt ?: dueAt,
-                    sourceType = sourceType,
-                    sourceRefId = sourceRefId,
-                    sourceCycleKey = sourceCycleKey,
                 ),
             )
             if (recurrence == null || recurrence.mode == RecurrenceMode.NONE) {
@@ -243,6 +557,12 @@ class LedgerRepository(
         }
     }
 
+    suspend fun deleteTodo(todoId: Long) {
+        dao.deleteTodo(todoId)
+    }
+
+    // --- App Lock ---
+
     suspend fun setPassword(rawPassword: String) {
         dao.upsertAppLockSettings(
             AppLockSettingsEntity(
@@ -270,37 +590,21 @@ class LedgerRepository(
         dao.upsertAppLockSettings(current.copy(failedAttempts = 0))
     }
 
-    suspend fun wipeInternalData() {
+    suspend fun disablePassword() {
+        dao.upsertAppLockSettings(
+            AppLockSettingsEntity(
+                id = 0,
+                passwordHash = "",
+                failedAttempts = 0,
+            ),
+        )
+    }
+
+    suspend fun wipeInternalData() = withContext(Dispatchers.IO) {
         database.clearAllTables()
     }
 
-    suspend fun generateBirthdayTodos(today: LocalDate = LocalDate.now()): Int {
-        val zoneId = ZoneId.systemDefault()
-        var created = 0
-        val birthdayInTwoWeeks = today.plusDays(14)
-        val peopleWithBirthday = dao.getPeopleByBirthday(
-            month = birthdayInTwoWeeks.monthValue,
-            day = birthdayInTwoWeeks.dayOfMonth,
-        )
-        peopleWithBirthday.forEach { person ->
-            val cycleKey = "${birthdayInTwoWeeks.year}-${person.id}"
-            if (!dao.hasGeneratedTodo("birthday-gift", person.id, cycleKey)) {
-                val reminder = today.atTime(9, 0).atZone(zoneId).toInstant().toEpochMilli()
-                saveTodo(
-                    title = "给 ${person.name} 准备礼物",
-                    description = "生日临近，提前两周准备礼物。",
-                    dueAt = reminder,
-                    reminderAt = reminder,
-                    recurrence = null,
-                    sourceType = "birthday-gift",
-                    sourceRefId = person.id,
-                    sourceCycleKey = cycleKey,
-                )
-                created += 1
-            }
-        }
-        return created
-    }
+    // --- Notifications ---
 
     suspend fun dueTodoNotifications(nowMillis: Long = System.currentTimeMillis()): List<TodoEntity> {
         val dueItems = dao.getDueTodos(nowMillis)
@@ -319,24 +623,27 @@ class LedgerRepository(
         dao.updateTodo(item.todo.copy(lastNotifiedAt = atMillis))
     }
 
+    // --- Export / Import ---
+
     suspend fun exportJson(outputStream: OutputStream) {
         val accounts = dao.getAccounts()
         val snapshots = dao.getSnapshots()
         val people = dao.getPeopleWithGifts()
         val todos = dao.getTodos()
-        val noteCategories = dao.getNoteCategories()
+        val categories = dao.getAllCategories()
         val notes = dao.getNotes()
+        val lockSettings = dao.getAppLockSettings()
+        val tags = dao.getAllTags()
+        val snapshotTagRefs = dao.getAllSnapshotTagRefs()
         val bundle = ExportBundle(
-            schemaVersion = 1,
+            schemaVersion = 4,
             exportedAt = System.currentTimeMillis(),
             accounts = accounts.map {
                 ExportAccount(
-                    id = it.id,
-                    name = it.name,
-                    type = it.type,
-                    accountNumber = it.accountNumber,
-                    note = it.note,
+                    id = it.id, name = it.name, type = it.type,
+                    accountNumber = it.accountNumber, note = it.note,
                     includeInNetWorth = it.includeInNetWorth,
+                    archived = it.archived,
                 )
             },
             snapshots = snapshots.map { snapshot ->
@@ -345,91 +652,70 @@ class LedgerRepository(
                     snapshotDate = snapshot.snapshot.snapshotDate,
                     createdAt = snapshot.snapshot.createdAt,
                     nextRecordAt = snapshot.snapshot.nextRecordAt,
-                    targetTotalInCents = snapshot.snapshot.targetTotalInCents,
+                    targetTotal = snapshot.snapshot.targetTotal,
                     debtLabel = snapshot.snapshot.debtLabel,
-                    debtAmountInCents = snapshot.snapshot.debtAmountInCents,
+                    debtAmount = snapshot.snapshot.debtAmount,
                     note = snapshot.snapshot.note,
                     balances = snapshot.balances.map {
-                        ExportSnapshotBalance(
-                            accountId = it.accountId,
-                            amountInCents = it.amountInCents,
-                        )
+                        ExportSnapshotBalance(accountId = it.accountId, amount = it.amount)
                     },
                     expenses = snapshot.expenses.map {
-                        ExportSnapshotExpense(
-                            categoryName = it.categoryName,
-                            amountInCents = it.amountInCents,
-                        )
+                        ExportSnapshotExpense(categoryId = it.categoryId, amount = it.amount)
                     },
+                    mood = snapshot.snapshot.mood,
                 )
             },
             people = people.map {
                 ExportPerson(
-                    id = it.person.id,
-                    name = it.person.name,
-                    birthdayMonth = it.person.birthdayMonth,
-                    birthdayDay = it.person.birthdayDay,
-                    relation = it.person.relation,
-                    note = it.person.note,
+                    id = it.person.id, name = it.person.name,
+                    birthdayMonth = it.person.birthdayMonth, birthdayDay = it.person.birthdayDay,
+                    relation = it.person.relation, note = it.person.note,
+                    sortOrder = it.person.sortOrder,
                 )
             },
             giftRecords = people.flatMap { person ->
                 person.gifts.map {
                     ExportGiftRecord(
-                        id = it.id,
-                        personId = it.personId,
-                        date = it.date,
-                        direction = it.direction.name,
-                        giftName = it.giftName,
-                        priceInCents = it.priceInCents,
-                        note = it.note,
+                        id = it.id, personId = it.personId, date = it.date,
+                        direction = it.direction.name, giftName = it.giftName,
+                        price = it.price, note = it.note,
                     )
                 }
             },
             todos = todos.map {
                 ExportTodo(
-                    id = it.todo.id,
-                    title = it.todo.title,
-                    description = it.todo.description,
-                    createdAt = it.todo.createdAt,
-                    isCompleted = it.todo.isCompleted,
-                    dueAt = it.todo.dueAt,
-                    reminderAt = it.todo.reminderAt,
-                    nextTriggerAt = it.todo.nextTriggerAt,
-                    completedAt = it.todo.completedAt,
-                    lastCompletedAt = it.todo.lastCompletedAt,
-                    sourceType = it.todo.sourceType,
-                    sourceRefId = it.todo.sourceRefId,
-                    sourceCycleKey = it.todo.sourceCycleKey,
+                    id = it.todo.id, title = it.todo.title,
+                    description = it.todo.description, createdAt = it.todo.createdAt,
+                    isCompleted = it.todo.isCompleted, dueAt = it.todo.dueAt,
+                    reminderAt = it.todo.reminderAt, nextTriggerAt = it.todo.nextTriggerAt,
+                    completedAt = it.todo.completedAt, lastCompletedAt = it.todo.lastCompletedAt,
                     recurrence = it.rule?.let { rule ->
                         ExportRecurrenceRule(
-                            mode = rule.mode.name,
-                            interval = rule.interval,
-                            daysOfWeekCsv = rule.daysOfWeekCsv,
-                            dayOfMonth = rule.dayOfMonth,
-                            monthsCsv = rule.monthsCsv,
-                            hour = rule.hour,
-                            minute = rule.minute,
+                            mode = rule.mode.name, interval = rule.interval,
+                            daysOfWeekCsv = rule.daysOfWeekCsv, dayOfMonth = rule.dayOfMonth,
+                            monthsCsv = rule.monthsCsv, hour = rule.hour, minute = rule.minute,
                         )
                     },
                 )
             },
-            noteCategories = noteCategories.map {
-                ExportNoteCategory(
-                    id = it.id,
-                    name = it.name,
-                    createdAt = it.createdAt,
-                    sortOrder = it.sortOrder,
+            expenseCategories = categories.map {
+                ExportExpenseCategory(
+                    id = it.id, name = it.name, sortOrder = it.sortOrder,
+                    archived = it.archived, createdAt = it.createdAt,
                 )
             },
             notes = notes.map {
                 ExportNote(
-                    id = it.id,
-                    categoryId = it.categoryId,
-                    body = it.body,
-                    createdAt = it.createdAt,
-                    updatedAt = it.updatedAt,
+                    id = it.id, title = it.title, body = it.body,
+                    createdAt = it.createdAt, updatedAt = it.updatedAt,
                 )
+            },
+            lock = ExportLock(passwordHash = lockSettings?.passwordHash.orEmpty()),
+            tags = tags.map {
+                ExportTag(id = it.id, name = it.name, archived = it.archived, sortOrder = it.sortOrder)
+            },
+            snapshotTags = snapshotTagRefs.map {
+                ExportSnapshotTag(snapshotId = it.snapshotId, tagId = it.tagId)
             },
         )
         outputStream.writer().use { writer ->
@@ -453,126 +739,113 @@ class LedgerRepository(
             bundle.accounts.forEach {
                 dao.upsertAccount(
                     AccountEntity(
-                        id = it.id,
-                        name = it.name,
-                        type = it.type,
-                        accountNumber = it.accountNumber,
-                        note = it.note,
+                        id = it.id, name = it.name, type = it.type,
+                        accountNumber = it.accountNumber, note = it.note,
                         includeInNetWorth = it.includeInNetWorth,
+                        archived = it.archived,
+                    ),
+                )
+            }
+            bundle.expenseCategories.forEach {
+                dao.insertCategory(
+                    ExpenseCategoryEntity(
+                        id = it.id, name = it.name, sortOrder = it.sortOrder,
+                        archived = it.archived, createdAt = it.createdAt,
+                    ),
+                )
+            }
+            bundle.tags.forEach {
+                dao.insertTag(
+                    TagEntity(
+                        id = it.id, name = it.name,
+                        archived = it.archived, sortOrder = it.sortOrder,
                     ),
                 )
             }
             bundle.snapshots.forEach { snapshot ->
                 dao.insertSnapshot(
                     SnapshotEntity(
-                        id = snapshot.id,
-                        snapshotDate = snapshot.snapshotDate,
-                        createdAt = snapshot.createdAt,
-                        nextRecordAt = snapshot.nextRecordAt,
-                        targetTotalInCents = snapshot.targetTotalInCents,
-                        debtLabel = snapshot.debtLabel,
-                        debtAmountInCents = snapshot.debtAmountInCents,
-                        note = snapshot.note,
+                        id = snapshot.id, snapshotDate = snapshot.snapshotDate,
+                        createdAt = snapshot.createdAt, nextRecordAt = snapshot.nextRecordAt,
+                        targetTotal = snapshot.targetTotal, debtLabel = snapshot.debtLabel,
+                        debtAmount = snapshot.debtAmount, note = snapshot.note,
+                        mood = snapshot.mood?.takeIf { it in 1..5 },
                     ),
                 )
                 dao.insertSnapshotBalances(
                     snapshot.balances.map {
-                        SnapshotBalanceEntity(
-                            snapshotId = snapshot.id,
-                            accountId = it.accountId,
-                            amountInCents = it.amountInCents,
-                        )
+                        SnapshotBalanceEntity(snapshotId = snapshot.id, accountId = it.accountId, amount = it.amount)
                     },
                 )
                 dao.insertSnapshotExpenses(
                     snapshot.expenses.map {
-                        SnapshotExpenseEntity(
-                            snapshotId = snapshot.id,
-                            categoryName = it.categoryName,
-                            amountInCents = it.amountInCents,
-                        )
+                        SnapshotExpenseEntity(snapshotId = snapshot.id, categoryId = it.categoryId, amount = it.amount)
                     },
                 )
             }
             bundle.people.forEach { person ->
                 dao.upsertPerson(
                     PersonEntity(
-                        id = person.id,
-                        name = person.name,
-                        birthdayMonth = person.birthdayMonth,
-                        birthdayDay = person.birthdayDay,
-                        relation = person.relation,
-                        note = person.note,
+                        id = person.id, name = person.name,
+                        birthdayMonth = person.birthdayMonth, birthdayDay = person.birthdayDay,
+                        relation = person.relation, note = person.note,
+                        sortOrder = person.sortOrder,
                     ),
                 )
             }
             bundle.giftRecords.forEach { gift ->
                 dao.insertGiftRecord(
                     GiftRecordEntity(
-                        id = gift.id,
-                        personId = gift.personId,
-                        date = gift.date,
+                        id = gift.id, personId = gift.personId, date = gift.date,
                         direction = GiftDirection.valueOf(gift.direction),
-                        giftName = gift.giftName,
-                        priceInCents = gift.priceInCents,
-                        note = gift.note,
+                        giftName = gift.giftName, price = gift.price, note = gift.note,
                     ),
-                )
-            }
-            bundle.noteCategories.forEach { category ->
-                dao.insertNoteCategory(
-                    NoteCategoryEntity(
-                        id = category.id,
-                        name = category.name,
-                        createdAt = category.createdAt,
-                        sortOrder = category.sortOrder,
-                    )
-                )
-            }
-            bundle.notes.forEach { note ->
-                dao.insertNote(
-                    NoteEntity(
-                        id = note.id,
-                        categoryId = note.categoryId,
-                        body = note.body,
-                        createdAt = note.createdAt,
-                        updatedAt = note.updatedAt,
-                    )
                 )
             }
             bundle.todos.forEach { todo ->
                 dao.insertTodo(
                     TodoEntity(
-                        id = todo.id,
-                        title = todo.title,
-                        description = todo.description,
-                        createdAt = todo.createdAt,
-                        isCompleted = todo.isCompleted,
-                        dueAt = todo.dueAt,
-                        reminderAt = todo.reminderAt,
-                        nextTriggerAt = todo.nextTriggerAt,
-                        completedAt = todo.completedAt,
+                        id = todo.id, title = todo.title, description = todo.description,
+                        createdAt = todo.createdAt, isCompleted = todo.isCompleted,
+                        dueAt = todo.dueAt, reminderAt = todo.reminderAt,
+                        nextTriggerAt = todo.nextTriggerAt, completedAt = todo.completedAt,
                         lastCompletedAt = todo.lastCompletedAt,
-                        sourceType = todo.sourceType,
-                        sourceRefId = todo.sourceRefId,
-                        sourceCycleKey = todo.sourceCycleKey,
                     ),
                 )
                 todo.recurrence?.let { rule ->
                     dao.upsertRecurrenceRule(
                         RecurrenceRuleEntity(
-                            todoId = todo.id,
-                            mode = RecurrenceMode.valueOf(rule.mode),
-                            interval = rule.interval,
-                            daysOfWeekCsv = rule.daysOfWeekCsv,
-                            dayOfMonth = rule.dayOfMonth,
-                            monthsCsv = rule.monthsCsv,
-                            hour = rule.hour,
-                            minute = rule.minute,
+                            todoId = todo.id, mode = RecurrenceMode.valueOf(rule.mode),
+                            interval = rule.interval, daysOfWeekCsv = rule.daysOfWeekCsv,
+                            dayOfMonth = rule.dayOfMonth, monthsCsv = rule.monthsCsv,
+                            hour = rule.hour, minute = rule.minute,
                         ),
                     )
                 }
             }
+            bundle.notes.forEach { note ->
+                dao.insertNote(
+                    NoteEntity(
+                        id = note.id, title = note.title, body = note.body,
+                        createdAt = note.createdAt, updatedAt = note.updatedAt,
+                    ),
+                )
+            }
+            if (bundle.snapshotTags.isNotEmpty()) {
+                dao.insertSnapshotTagRefs(
+                    bundle.snapshotTags.map {
+                        SnapshotTagCrossRef(snapshotId = it.snapshotId, tagId = it.tagId)
+                    },
+                )
+            }
+            val importedHash = bundle.lock?.passwordHash.orEmpty()
+            dao.upsertAppLockSettings(
+                AppLockSettingsEntity(
+                    id = 0,
+                    passwordHash = importedHash,
+                    failedAttempts = 0,
+                ),
+            )
         }
     }
 

@@ -6,10 +6,16 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.codex.offlineledger.data.AppDatabase
+import com.codex.offlineledger.data.ThemeMode
+import com.codex.offlineledger.data.UserPreferences
 import com.codex.offlineledger.data.entity.AccountEntity
+import com.codex.offlineledger.data.entity.ExpenseCategoryEntity
 import com.codex.offlineledger.data.entity.GiftDirection
+import com.codex.offlineledger.data.entity.NoteEntity
 import com.codex.offlineledger.data.entity.RecurrenceMode
+import com.codex.offlineledger.data.entity.TagEntity
 import com.codex.offlineledger.data.repo.LedgerRepository
+import com.codex.offlineledger.domain.CurrencyUnit
 import com.codex.offlineledger.domain.LedgerLogic
 import com.codex.offlineledger.domain.LedgerLogic.buildSnapshotSummaries
 import com.codex.offlineledger.domain.LedgerLogic.mapPeople
@@ -31,21 +37,42 @@ import java.time.DayOfWeek
 import java.time.Month
 
 enum class LedgerTab {
-    Assets,
-    Gifts,
+    Notes,
     Todos,
     Settings,
+    Assets,
+    Gifts,
 }
 
 data class LedgerUiState(
     val accounts: List<AccountEntity> = emptyList(),
+    val allAccounts: List<AccountEntity> = emptyList(),
     val snapshots: List<SnapshotSummary> = emptyList(),
     val people: List<PersonLedgerSummary> = emptyList(),
     val todos: List<TodoSummary> = emptyList(),
+    val expenseCategories: List<ExpenseCategoryEntity> = emptyList(),
+    val notes: List<NoteEntity> = emptyList(),
+    val tags: List<TagEntity> = emptyList(),
+    val allTags: List<TagEntity> = emptyList(),
+    val selectedTagFilterIds: Set<Long> = emptySet(),
     val passwordSet: Boolean = false,
     val failedAttempts: Int = 0,
     val unlocked: Boolean = false,
     val activeTab: LedgerTab = LedgerTab.Assets,
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val assetsUnit: CurrencyUnit = CurrencyUnit.THOUSAND,
+    val giftsUnit: CurrencyUnit = CurrencyUnit.THOUSAND,
+    val pendingAccountRestore: PendingAccountRestore? = null,
+)
+
+data class PendingAccountRestore(
+    val accountId: Long,
+    val archivedName: String,
+    val pendingName: String,
+    val type: String,
+    val accountNumber: String,
+    val note: String,
+    val includeInNetWorth: Boolean,
 )
 
 data class SnapshotBalanceDraft(
@@ -54,6 +81,7 @@ data class SnapshotBalanceDraft(
 )
 
 data class SnapshotExpenseDraft(
+    val categoryId: Long,
     val categoryName: String,
     val amountText: String,
 )
@@ -70,49 +98,134 @@ data class RecurrenceDraft(
 
 private data class LedgerBaseState(
     val accounts: List<AccountEntity>,
+    val allAccounts: List<AccountEntity>,
     val snapshots: List<com.codex.offlineledger.data.model.SnapshotWithDetails>,
     val people: List<com.codex.offlineledger.data.model.PersonWithGifts>,
     val todos: List<com.codex.offlineledger.data.model.TodoWithRule>,
     val lock: com.codex.offlineledger.data.entity.AppLockSettingsEntity?,
+    val expenseCategories: List<ExpenseCategoryEntity>,
+    val notes: List<NoteEntity>,
+    val activeTags: List<TagEntity> = emptyList(),
+    val allTags: List<TagEntity> = emptyList(),
+    val tagsBySnapshot: Map<Long, List<TagEntity>> = emptyMap(),
 )
 
 class LedgerViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = LedgerRepository(AppDatabase.getInstance(application))
+    private val prefs = UserPreferences(application)
     private val selectedTab = MutableStateFlow(LedgerTab.Assets)
     private val unlockedState = MutableStateFlow(false)
+    private val pendingAccountRestoreState = MutableStateFlow<PendingAccountRestore?>(null)
+    private val selectedTagFilterIds = MutableStateFlow<Set<Long>>(emptySet())
     private val _messages = MutableSharedFlow<String>()
     val messages = _messages
 
-    private val baseState = combine(
+    private val accountsCombined = combine(
         repository.accounts,
+        repository.allAccounts,
+    ) { active, all -> active to all }
+
+    private val baseState = combine(
+        accountsCombined,
         repository.snapshots,
         repository.people,
         repository.todos,
         repository.lockSettings,
     ) { accounts, snapshots, people, todos, lock ->
         LedgerBaseState(
-            accounts = accounts,
+            accounts = accounts.first,
+            allAccounts = accounts.second,
             snapshots = snapshots,
             people = people,
             todos = todos,
             lock = lock,
+            expenseCategories = emptyList(),
+            notes = emptyList(),
         )
     }
 
-    val uiState: StateFlow<LedgerUiState> = combine(
+    private val tagsCombined = combine(
+        repository.activeTags,
+        repository.allTags,
+        repository.snapshotTagJoin,
+    ) { active, all, join ->
+        val byId: Map<Long, TagEntity> = all.associateBy { it.id }
+        val bySnapshot: Map<Long, List<TagEntity>> = join
+            .groupBy { it.snapshotId }
+            .mapValues { (_, rows) ->
+                rows.mapNotNull { byId[it.id] }.sortedBy { it.name }
+            }
+        Triple(active, all, bySnapshot)
+    }
+
+    private val extendedState = combine(
         baseState,
+        repository.activeCategories,
+        repository.notes,
+        tagsCombined,
+    ) { base, categories, notes, tags ->
+        base.copy(
+            expenseCategories = categories,
+            notes = notes,
+            activeTags = tags.first,
+            allTags = tags.second,
+            tagsBySnapshot = tags.third,
+        )
+    }
+
+    private val prefsState = combine(
+        prefs.themeMode,
+        prefs.assetsUnit,
+        prefs.giftsUnit,
+    ) { theme, assetsUnit, giftsUnit ->
+        Triple(theme, assetsUnit, giftsUnit)
+    }
+
+    private val auxiliaryState = combine(
+        pendingAccountRestoreState,
+        selectedTagFilterIds,
+    ) { pending, tagFilter -> pending to tagFilter }
+
+    val uiState: StateFlow<LedgerUiState> = combine(
+        extendedState,
         selectedTab,
         unlockedState,
-    ) { base, tab, unlocked ->
+        prefsState,
+        auxiliaryState,
+    ) { base, tab, unlocked, prefs, aux ->
+        val (pendingRestore, tagFilterIds) = aux
+        val summaries = buildSnapshotSummaries(
+            base.allAccounts,
+            base.snapshots,
+            base.expenseCategories,
+            base.tagsBySnapshot,
+        )
+        val filteredSummaries = if (tagFilterIds.isEmpty()) {
+            summaries
+        } else {
+            summaries.filter { summary ->
+                summary.tags.any { it.id in tagFilterIds }
+            }
+        }
         LedgerUiState(
             accounts = base.accounts,
-            snapshots = buildSnapshotSummaries(base.accounts, base.snapshots),
+            allAccounts = base.allAccounts,
+            snapshots = filteredSummaries,
             people = mapPeople(base.people),
             todos = mapTodos(base.todos),
+            expenseCategories = base.expenseCategories,
+            notes = base.notes,
+            tags = base.activeTags,
+            allTags = base.allTags,
+            selectedTagFilterIds = tagFilterIds,
             passwordSet = !base.lock?.passwordHash.isNullOrBlank(),
             failedAttempts = base.lock?.failedAttempts ?: 0,
             unlocked = unlocked || base.lock?.passwordHash.isNullOrBlank(),
             activeTab = tab,
+            themeMode = prefs.first,
+            assetsUnit = prefs.second,
+            giftsUnit = prefs.third,
+            pendingAccountRestore = pendingRestore,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -123,6 +236,8 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
     fun selectTab(tab: LedgerTab) {
         selectedTab.value = tab
     }
+
+    // --- Accounts ---
 
     fun saveAccount(
         name: String,
@@ -137,9 +252,101 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
                 return@launch
             }
             repository.saveAccount(name, type, accountNumber, note, includeInNetWorth)
-            _messages.emit("账户已保存")
+                .onSuccess {
+                    _messages.emit("账户已保存")
+                }.onFailure { err ->
+                    if (err is LedgerRepository.AccountArchivedConflict) {
+                        pendingAccountRestoreState.value = PendingAccountRestore(
+                            accountId = err.id,
+                            archivedName = err.name,
+                            pendingName = name.trim(),
+                            type = type.trim(),
+                            accountNumber = accountNumber.trim(),
+                            note = note.trim(),
+                            includeInNetWorth = includeInNetWorth,
+                        )
+                    } else {
+                        _messages.emit(err.message ?: "账户保存失败")
+                    }
+                }
         }
     }
+
+    fun updateAccount(
+        id: Long,
+        name: String,
+        type: String,
+        accountNumber: String,
+        note: String,
+        includeInNetWorth: Boolean,
+    ) {
+        viewModelScope.launch {
+            repository.updateAccount(id, name, type, accountNumber, note, includeInNetWorth)
+                .onSuccess { _messages.emit("账户已更新") }
+                .onFailure { _messages.emit(it.message ?: "账户更新失败") }
+        }
+    }
+
+    fun archiveAccount(id: Long) {
+        viewModelScope.launch {
+            repository.archiveAccount(id)
+            _messages.emit("账户已归档，历史快照保留")
+        }
+    }
+
+    fun confirmRestoreArchivedAccount() {
+        val pending = pendingAccountRestoreState.value ?: return
+        viewModelScope.launch {
+            repository.restoreAndUpdateAccount(
+                id = pending.accountId,
+                name = pending.pendingName,
+                type = pending.type,
+                accountNumber = pending.accountNumber,
+                note = pending.note,
+                includeInNetWorth = pending.includeInNetWorth,
+            ).onSuccess {
+                pendingAccountRestoreState.value = null
+                _messages.emit("已恢复并更新归档账户")
+            }.onFailure {
+                _messages.emit(it.message ?: "恢复账户失败")
+            }
+        }
+    }
+
+    fun cancelRestoreArchivedAccount() {
+        pendingAccountRestoreState.value = null
+    }
+
+    // --- Expense Categories ---
+
+    fun saveExpenseCategory(name: String) {
+        viewModelScope.launch {
+            repository.saveExpenseCategory(name).onFailure {
+                _messages.emit(it.message ?: "保存失败")
+            }.onSuccess {
+                _messages.emit("分类已保存")
+            }
+        }
+    }
+
+    fun renameExpenseCategory(id: Long, newName: String) {
+        viewModelScope.launch {
+            repository.renameExpenseCategory(id, newName).onFailure {
+                _messages.emit(it.message ?: "重命名失败")
+            }.onSuccess {
+                _messages.emit("分类已重命名")
+            }
+        }
+    }
+
+    fun archiveExpenseCategory(id: Long) {
+        viewModelScope.launch {
+            repository.archiveExpenseCategory(id)
+            _messages.emit("分类已归档")
+        }
+    }
+
+    // --- Snapshots ---
 
     fun saveSnapshot(
         snapshotDateText: String,
@@ -150,39 +357,122 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
         note: String,
         balances: List<SnapshotBalanceDraft>,
         expenses: List<SnapshotExpenseDraft>,
+        unit: CurrencyUnit,
+        mood: Int? = null,
+        tagIds: List<Long> = emptyList(),
     ) {
         viewModelScope.launch {
-            if (expenses.size > 10) {
-                _messages.emit("花销分类最多 10 个")
-                return@launch
-            }
             val parsedBalances = balances.mapNotNull { draft ->
-                val amount = LedgerLogic.parseCurrencyToCents(draft.amountText)
-                if (amount == null) {
-                    null
-                } else {
-                    draft.accountId to amount
-                }
+                val amount = LedgerLogic.parseCurrency(draft.amountText, unit)
+                if (amount == null) null else draft.accountId to amount
             }
-            val invalidBalance = balances.any { LedgerLogic.parseCurrencyToCents(it.amountText) == null }
-            val invalidExpense = expenses.any { LedgerLogic.parseCurrencyToCents(it.amountText) == null || it.categoryName.isBlank() }
+            val invalidBalance = balances.any { LedgerLogic.parseCurrency(it.amountText, unit) == null }
+            val invalidExpense = expenses.any { LedgerLogic.parseCurrency(it.amountText, unit) == null }
             if (invalidBalance || invalidExpense) {
-                _messages.emit("请检查金额格式，分类名称不能为空")
+                _messages.emit("请检查金额格式")
                 return@launch
+            }
+            val parsedExpenses = expenses.mapNotNull { draft ->
+                val amount = LedgerLogic.parseCurrency(draft.amountText, unit) ?: return@mapNotNull null
+                if (amount == 0L) return@mapNotNull null
+                var catId = draft.categoryId
+                if (catId == 0L && draft.categoryName.isNotBlank()) {
+                    val result = repository.saveExpenseCategory(draft.categoryName)
+                    catId = result.getOrElse {
+                        _messages.emit(it.message ?: "分类保存失败")
+                        return@launch
+                    }
+                }
+                catId to amount
             }
             repository.saveSnapshot(
                 snapshotDate = LedgerLogic.parseDateOrNow(snapshotDateText),
                 nextRecordAt = LedgerLogic.parseOptionalDate(nextRecordText),
-                targetTotalInCents = targetText.takeIf { it.isNotBlank() }?.let(LedgerLogic::parseCurrencyToCents),
+                targetTotal = targetText.takeIf { it.isNotBlank() }?.let { LedgerLogic.parseCurrency(it, unit) },
                 debtLabel = debtLabel,
-                debtAmountInCents = debtAmountText.takeIf { it.isNotBlank() }?.let(LedgerLogic::parseCurrencyToCents),
+                debtAmount = debtAmountText.takeIf { it.isNotBlank() }?.let { LedgerLogic.parseCurrency(it, unit) },
                 note = note,
                 balances = parsedBalances,
-                expenses = expenses.map { it.categoryName to (LedgerLogic.parseCurrencyToCents(it.amountText) ?: 0L) },
+                expenses = parsedExpenses,
+                mood = mood,
+                tagIds = tagIds,
             )
             _messages.emit("资产快照已保存")
         }
     }
+
+    fun deleteSnapshot(id: Long) {
+        viewModelScope.launch {
+            repository.deleteSnapshot(id)
+            _messages.emit("快照已删除")
+        }
+    }
+
+    fun editSnapshotAnnotation(
+        snapshotId: Long,
+        mood: Int?,
+        note: String,
+        tagIds: List<Long>,
+    ) {
+        viewModelScope.launch {
+            repository.updateSnapshotAnnotation(snapshotId, mood, note, tagIds)
+                .onSuccess { _messages.emit("批注已更新") }
+                .onFailure { _messages.emit(it.message ?: "批注更新失败") }
+        }
+    }
+
+    // --- Tag filter ---
+
+    fun toggleTagFilter(tagId: Long) {
+        val current = selectedTagFilterIds.value
+        selectedTagFilterIds.value = if (tagId in current) current - tagId else current + tagId
+    }
+
+    fun clearTagFilter() {
+        selectedTagFilterIds.value = emptySet()
+    }
+
+    // --- Tags ---
+
+    fun saveTag(name: String) {
+        viewModelScope.launch {
+            repository.saveTag(name)
+                .onSuccess { _messages.emit("标签已保存") }
+                .onFailure { _messages.emit(it.message ?: "标签保存失败") }
+        }
+    }
+
+    fun renameTag(id: Long, newName: String) {
+        viewModelScope.launch {
+            repository.renameTag(id, newName)
+                .onSuccess { _messages.emit("标签已重命名") }
+                .onFailure { _messages.emit(it.message ?: "标签重命名失败") }
+        }
+    }
+
+    fun archiveTag(id: Long) {
+        viewModelScope.launch {
+            repository.archiveTag(id)
+            _messages.emit("标签已归档")
+        }
+    }
+
+    fun unarchiveTag(id: Long) {
+        viewModelScope.launch {
+            repository.unarchiveTag(id)
+            _messages.emit("标签已恢复")
+        }
+    }
+
+    fun deleteTagIfUnused(id: Long) {
+        viewModelScope.launch {
+            repository.deleteTagIfUnused(id)
+                .onSuccess { _messages.emit("标签已删除") }
+                .onFailure { _messages.emit(it.message ?: "标签无法删除") }
+        }
+    }
+
+    // --- People ---
 
     fun savePerson(
         name: String,
@@ -192,14 +482,69 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
         note: String,
     ) {
         viewModelScope.launch {
-            val month = birthdayMonthText.toIntOrNull()
-            val day = birthdayDayText.toIntOrNull()
-            if (name.isBlank() || month == null || day == null || month !in 1..12 || day !in 1..31) {
-                _messages.emit("请填写有效的姓名和生日")
+            if (name.isBlank()) {
+                _messages.emit("请填写姓名")
+                return@launch
+            }
+            val (month, day, birthdayOk) = parseOptionalBirthday(birthdayMonthText, birthdayDayText)
+            if (!birthdayOk) {
+                _messages.emit("生日格式不正确，或留空")
                 return@launch
             }
             repository.savePerson(name, month, day, relation, note)
             _messages.emit("联系人已保存")
+        }
+    }
+
+    fun updatePerson(
+        id: Long,
+        name: String,
+        birthdayMonthText: String,
+        birthdayDayText: String,
+        relation: String,
+        note: String,
+    ) {
+        viewModelScope.launch {
+            if (name.isBlank()) {
+                _messages.emit("请填写姓名")
+                return@launch
+            }
+            val (month, day, birthdayOk) = parseOptionalBirthday(birthdayMonthText, birthdayDayText)
+            if (!birthdayOk) {
+                _messages.emit("生日格式不正确，或留空")
+                return@launch
+            }
+            repository.updatePerson(id, name, month, day, relation, note)
+            _messages.emit("联系人已更新")
+        }
+    }
+
+    private data class OptionalBirthday(
+        val month: Int?,
+        val day: Int?,
+        val ok: Boolean,
+    )
+
+    private fun parseOptionalBirthday(monthText: String, dayText: String): OptionalBirthday {
+        val monthBlank = monthText.isBlank()
+        val dayBlank = dayText.isBlank()
+        if (monthBlank && dayBlank) return OptionalBirthday(null, null, true)
+        val month = monthText.toIntOrNull()
+        val day = dayText.toIntOrNull()
+        val valid = month != null && day != null && month in 1..12 && day in 1..31
+        return OptionalBirthday(month, day, valid)
+    }
+
+    fun deletePerson(id: Long) {
+        viewModelScope.launch {
+            repository.deletePerson(id)
+            _messages.emit("联系人已删除")
+        }
+    }
+
+    fun reorderPeople(orderedIds: List<Long>) {
+        viewModelScope.launch {
+            repository.reorderPeople(orderedIds)
         }
     }
 
@@ -210,9 +555,10 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
         giftName: String,
         priceText: String,
         note: String,
+        unit: CurrencyUnit,
     ) {
         viewModelScope.launch {
-            val amount = LedgerLogic.parseCurrencyToCents(priceText)
+            val amount = LedgerLogic.parseCurrency(priceText, unit)
             if (personId <= 0 || giftName.isBlank() || priceText.isBlank() || amount == null) {
                 _messages.emit("请填写有效的礼物信息")
                 return@launch
@@ -222,12 +568,45 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
                 date = LedgerLogic.parseDateOrNow(dateText),
                 direction = direction,
                 giftName = giftName,
-                priceInCents = amount,
+                price = amount,
                 note = note,
             )
             _messages.emit("送礼记录已保存")
         }
     }
+
+    // --- Notes ---
+
+    fun saveNote(title: String, body: String) {
+        viewModelScope.launch {
+            if (title.isBlank()) {
+                _messages.emit("笔记标题不能为空")
+                return@launch
+            }
+            repository.saveNote(title, body)
+            _messages.emit("笔记已保存")
+        }
+    }
+
+    fun updateNote(id: Long, title: String, body: String) {
+        viewModelScope.launch {
+            if (title.isBlank()) {
+                _messages.emit("笔记标题不能为空")
+                return@launch
+            }
+            repository.updateNote(id, title, body)
+            _messages.emit("笔记已更新")
+        }
+    }
+
+    fun deleteNote(id: Long) {
+        viewModelScope.launch {
+            repository.deleteNote(id)
+            _messages.emit("笔记已删除")
+        }
+    }
+
+    // --- Todos ---
 
     fun saveTodo(
         title: String,
@@ -272,7 +651,34 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun deleteTodo(todoId: Long) {
+        viewModelScope.launch {
+            repository.deleteTodo(todoId)
+            _messages.emit("Todo 已删除")
+        }
+    }
+
+    // --- Preferences ---
+
+    fun setThemeMode(mode: ThemeMode) {
+        viewModelScope.launch { prefs.setThemeMode(mode) }
+    }
+
+    fun setAssetsUnit(unit: CurrencyUnit) {
+        viewModelScope.launch { prefs.setAssetsUnit(unit) }
+    }
+
+    fun setGiftsUnit(unit: CurrencyUnit) {
+        viewModelScope.launch { prefs.setGiftsUnit(unit) }
+    }
+
+    // --- Password ---
+
     fun setPassword(password: String, confirmPassword: String) {
+        enablePassword(password, confirmPassword)
+    }
+
+    fun enablePassword(password: String, confirmPassword: String) {
         viewModelScope.launch {
             if (password.length < 4) {
                 _messages.emit("密码至少 4 位")
@@ -284,7 +690,7 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
             }
             repository.setPassword(password)
             unlockedState.value = true
-            _messages.emit("密码已设置")
+            _messages.emit("密码已启用")
         }
     }
 
@@ -300,6 +706,18 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
             }
             repository.setPassword(next)
             _messages.emit("密码已更新")
+        }
+    }
+
+    fun disablePassword(current: String) {
+        viewModelScope.launch {
+            if (!repository.verifyPassword(current)) {
+                _messages.emit("当前密码不正确")
+                return@launch
+            }
+            repository.disablePassword()
+            unlockedState.value = true
+            _messages.emit("应用密码已关闭")
         }
     }
 
@@ -320,14 +738,18 @@ class LedgerViewModel(application: Application) : AndroidViewModel(application) 
                     LockAction.KEEP_LOCKED -> _messages.emit("密码错误，还剩 ${feedback.attemptsRemaining} 次机会")
                     LockAction.WARN_FINAL_ATTEMPT -> _messages.emit("再失败 1 次将销毁本地数据")
                     LockAction.WIPE_DATA -> {
-                        repository.wipeInternalData()
-                        unlockedState.value = false
-                        _messages.emit("已连续 5 次输错密码，本地数据已销毁")
+                        runCatching { repository.wipeInternalData() }
+                        runCatching { prefs.clear() }
+                        pendingAccountRestoreState.value = null
+                        unlockedState.value = true
+                        _messages.emit("已连续 5 次输错密码，数据已销毁，App 已重置")
                     }
                 }
             }
         }
     }
+
+    // --- Export / Import ---
 
     fun exportFileName(): String = "offline-ledger-${LedgerLogic.formatDate(System.currentTimeMillis())}.json"
 

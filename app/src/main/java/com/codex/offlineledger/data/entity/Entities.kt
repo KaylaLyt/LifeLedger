@@ -26,6 +26,7 @@ data class AccountEntity(
     val accountNumber: String,
     val note: String = "",
     val includeInNetWorth: Boolean = true,
+    val archived: Boolean = false,
 )
 
 @Entity(tableName = "snapshots")
@@ -34,10 +35,11 @@ data class SnapshotEntity(
     val snapshotDate: Long,
     val createdAt: Long,
     val nextRecordAt: Long? = null,
-    val targetTotalInCents: Long? = null,
+    val targetTotal: Long? = null,
     val debtLabel: String = "",
-    val debtAmountInCents: Long? = null,
+    val debtAmount: Long? = null,
     val note: String = "",
+    val mood: Int? = null,
 )
 
 @Entity(
@@ -62,7 +64,22 @@ data class SnapshotEntity(
 data class SnapshotBalanceEntity(
     val snapshotId: Long,
     val accountId: Long,
-    val amountInCents: Long,
+    val amount: Long,
+)
+
+@Entity(
+    tableName = "expense_categories",
+    indices = [
+        Index(value = ["name"], unique = true),
+        Index(value = ["sortOrder"]),
+    ],
+)
+data class ExpenseCategoryEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val sortOrder: Int = 0,
+    val archived: Boolean = false,
+    val createdAt: Long,
 )
 
 @Entity(
@@ -74,24 +91,31 @@ data class SnapshotBalanceEntity(
             childColumns = ["snapshotId"],
             onDelete = ForeignKey.CASCADE,
         ),
+        ForeignKey(
+            entity = ExpenseCategoryEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["categoryId"],
+            onDelete = ForeignKey.RESTRICT,
+        ),
     ],
-    indices = [Index("snapshotId")],
+    indices = [Index("snapshotId"), Index("categoryId")],
 )
 data class SnapshotExpenseEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val snapshotId: Long,
-    val categoryName: String,
-    val amountInCents: Long,
+    val categoryId: Long,
+    val amount: Long,
 )
 
 @Entity(tableName = "people")
 data class PersonEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
-    val birthdayMonth: Int,
-    val birthdayDay: Int,
+    val birthdayMonth: Int? = null,
+    val birthdayDay: Int? = null,
     val relation: String = "",
     val note: String = "",
+    val sortOrder: Int = 0,
 )
 
 @Entity(
@@ -112,7 +136,7 @@ data class GiftRecordEntity(
     val date: Long,
     val direction: GiftDirection,
     val giftName: String,
-    val priceInCents: Long,
+    val price: Long,
     val note: String = "",
 )
 
@@ -129,43 +153,15 @@ data class TodoEntity(
     val completedAt: Long? = null,
     val lastCompletedAt: Long? = null,
     val lastNotifiedAt: Long? = null,
-    val sourceType: String? = null,
-    val sourceRefId: Long? = null,
-    val sourceCycleKey: String? = null,
-)
-
-@Entity(
-    tableName = "note_categories",
-    indices = [
-        Index(value = ["name"], unique = true),
-        Index(value = ["sortOrder"]),
-    ],
-)
-data class NoteCategoryEntity(
-    @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val name: String,
-    val createdAt: Long,
-    val sortOrder: Int,
 )
 
 @Entity(
     tableName = "notes",
-    foreignKeys = [
-        ForeignKey(
-            entity = NoteCategoryEntity::class,
-            parentColumns = ["id"],
-            childColumns = ["categoryId"],
-            onDelete = ForeignKey.SET_NULL,
-        ),
-    ],
-    indices = [
-        Index("categoryId"),
-        Index("updatedAt"),
-    ],
+    indices = [Index("updatedAt")],
 )
 data class NoteEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val categoryId: Long? = null,
+    val title: String,
     val body: String,
     val createdAt: Long,
     val updatedAt: Long,
@@ -191,6 +187,44 @@ data class RecurrenceRuleEntity(
     val monthsCsv: String = "",
     val hour: Int? = null,
     val minute: Int? = null,
+)
+
+@Entity(
+    tableName = "tags",
+    indices = [
+        Index(value = ["name"], unique = true),
+        Index(value = ["sortOrder"]),
+    ],
+)
+data class TagEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val name: String,
+    val archived: Boolean = false,
+    val sortOrder: Int = 0,
+)
+
+@Entity(
+    tableName = "snapshot_tags",
+    primaryKeys = ["snapshotId", "tagId"],
+    foreignKeys = [
+        ForeignKey(
+            entity = SnapshotEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["snapshotId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = TagEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["tagId"],
+            onDelete = ForeignKey.RESTRICT,
+        ),
+    ],
+    indices = [Index("tagId")],
+)
+data class SnapshotTagCrossRef(
+    val snapshotId: Long,
+    val tagId: Long,
 )
 
 @Entity(tableName = "app_lock")

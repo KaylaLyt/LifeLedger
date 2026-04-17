@@ -11,8 +11,11 @@ data class ExportBundle(
     val people: List<ExportPerson>,
     val giftRecords: List<ExportGiftRecord>,
     val todos: List<ExportTodo>,
-    val noteCategories: List<ExportNoteCategory>,
+    val expenseCategories: List<ExportExpenseCategory>,
     val notes: List<ExportNote>,
+    val lock: ExportLock? = null,
+    val tags: List<ExportTag> = emptyList(),
+    val snapshotTags: List<ExportSnapshotTag> = emptyList(),
 )
 
 @Serializable
@@ -23,6 +26,12 @@ data class ExportAccount(
     val accountNumber: String,
     val note: String,
     val includeInNetWorth: Boolean,
+    val archived: Boolean = false,
+)
+
+@Serializable
+data class ExportLock(
+    val passwordHash: String = "",
 )
 
 @Serializable
@@ -31,34 +40,36 @@ data class ExportSnapshot(
     val snapshotDate: Long,
     val createdAt: Long,
     val nextRecordAt: Long?,
-    val targetTotalInCents: Long?,
+    val targetTotal: Long?,
     val debtLabel: String,
-    val debtAmountInCents: Long?,
+    val debtAmount: Long?,
     val note: String,
     val balances: List<ExportSnapshotBalance>,
     val expenses: List<ExportSnapshotExpense>,
+    val mood: Int? = null,
 )
 
 @Serializable
 data class ExportSnapshotBalance(
     val accountId: Long,
-    val amountInCents: Long,
+    val amount: Long,
 )
 
 @Serializable
 data class ExportSnapshotExpense(
-    val categoryName: String,
-    val amountInCents: Long,
+    val categoryId: Long,
+    val amount: Long,
 )
 
 @Serializable
 data class ExportPerson(
     val id: Long,
     val name: String,
-    val birthdayMonth: Int,
-    val birthdayDay: Int,
+    val birthdayMonth: Int? = null,
+    val birthdayDay: Int? = null,
     val relation: String,
     val note: String,
+    val sortOrder: Int,
 )
 
 @Serializable
@@ -68,7 +79,7 @@ data class ExportGiftRecord(
     val date: Long,
     val direction: String,
     val giftName: String,
-    val priceInCents: Long,
+    val price: Long,
     val note: String,
 )
 
@@ -84,9 +95,6 @@ data class ExportTodo(
     val nextTriggerAt: Long?,
     val completedAt: Long?,
     val lastCompletedAt: Long?,
-    val sourceType: String?,
-    val sourceRefId: Long?,
-    val sourceCycleKey: String?,
     val recurrence: ExportRecurrenceRule?,
 )
 
@@ -102,18 +110,33 @@ data class ExportRecurrenceRule(
 )
 
 @Serializable
-data class ExportNoteCategory(
+data class ExportExpenseCategory(
     val id: Long,
     val name: String,
-    val createdAt: Long,
     val sortOrder: Int,
+    val archived: Boolean,
+    val createdAt: Long,
 )
 
 @Serializable
 data class ExportNote(
     val id: Long,
-    val categoryId: Long?,
+    val title: String,
     val body: String,
     val createdAt: Long,
     val updatedAt: Long,
+)
+
+@Serializable
+data class ExportTag(
+    val id: Long,
+    val name: String,
+    val archived: Boolean = false,
+    val sortOrder: Int = 0,
+)
+
+@Serializable
+data class ExportSnapshotTag(
+    val snapshotId: Long,
+    val tagId: Long,
 )

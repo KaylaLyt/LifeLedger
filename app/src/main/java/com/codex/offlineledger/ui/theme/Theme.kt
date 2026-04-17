@@ -6,37 +6,52 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 
 private val LightColors = lightColorScheme(
-    primary = Fern,
-    secondary = Clay,
-    tertiary = Moss,
-    surface = Sand,
-    background = Sand,
-    onPrimary = Sand,
-    onSecondary = Sand,
-    onBackground = Bark,
-    onSurface = Bark,
+    primary = LightPalette.Primary,
+    onPrimary = LightPalette.OnPrimary,
+    primaryContainer = LightPalette.PrimaryContainer,
+    onPrimaryContainer = LightPalette.OnPrimaryContainer,
+    secondary = LightPalette.Primary,
+    onSecondary = LightPalette.OnPrimary,
+    secondaryContainer = LightPalette.PrimaryContainer,
+    onSecondaryContainer = LightPalette.OnPrimaryContainer,
+    tertiary = LightPalette.Primary,
+    onTertiary = LightPalette.OnPrimary,
+    background = LightPalette.Background,
+    onBackground = LightPalette.OnBackground,
+    surface = LightPalette.Surface,
+    onSurface = LightPalette.OnSurface,
+    surfaceVariant = LightPalette.SurfaceVariant,
+    onSurfaceVariant = LightPalette.OnSurfaceVariant,
+    outline = LightPalette.Outline,
 )
 
 private val DarkColors = darkColorScheme(
-    primary = Mist,
-    secondary = Clay,
-    tertiary = Sand,
-    surface = Bark,
-    background = ColorTokens.DarkBackground,
-    onPrimary = Bark,
-    onSecondary = Sand,
-    onBackground = Sand,
-    onSurface = Sand,
+    primary = DarkPalette.Primary,
+    onPrimary = DarkPalette.OnPrimary,
+    primaryContainer = DarkPalette.PrimaryContainer,
+    onPrimaryContainer = DarkPalette.OnPrimaryContainer,
+    secondary = DarkPalette.Primary,
+    onSecondary = DarkPalette.OnPrimary,
+    secondaryContainer = DarkPalette.PrimaryContainer,
+    onSecondaryContainer = DarkPalette.OnPrimaryContainer,
+    tertiary = DarkPalette.Primary,
+    onTertiary = DarkPalette.OnPrimary,
+    background = DarkPalette.Background,
+    onBackground = DarkPalette.OnBackground,
+    surface = DarkPalette.Surface,
+    onSurface = DarkPalette.OnSurface,
+    surfaceVariant = DarkPalette.SurfaceVariant,
+    onSurfaceVariant = DarkPalette.OnSurfaceVariant,
+    outline = DarkPalette.Outline,
 )
 
-private object ColorTokens {
-    val DarkBackground = androidx.compose.ui.graphics.Color(0xFF1F221E)
-}
-
 @Composable
-fun OfflineLedgerTheme(content: @Composable () -> Unit) {
+fun OfflineLedgerTheme(
+    darkTheme: Boolean = false,
+    content: @Composable () -> Unit,
+) {
     MaterialTheme(
-        colorScheme = LightColors,
+        colorScheme = if (darkTheme) DarkColors else LightColors,
         typography = LedgerTypography,
         content = content,
     )

@@ -1,14 +1,17 @@
 package com.codex.offlineledger.domain
 
 import com.codex.offlineledger.data.entity.AccountEntity
+import com.codex.offlineledger.data.entity.ExpenseCategoryEntity
 import com.codex.offlineledger.data.entity.RecurrenceMode
 import com.codex.offlineledger.data.entity.RecurrenceRuleEntity
+import com.codex.offlineledger.data.entity.TagEntity
 import com.codex.offlineledger.data.model.PersonWithGifts
 import com.codex.offlineledger.data.model.SnapshotWithDetails
 import com.codex.offlineledger.data.model.TodoWithRule
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.security.MessageDigest
+import java.text.NumberFormat
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
@@ -16,27 +19,37 @@ import java.time.LocalDateTime
 import java.time.Month
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.max
+
+enum class CurrencyUnit(val multiplier: Long, val label: String) {
+    YUAN(1, "元"),
+    THOUSAND(1_000, "千"),
+    TEN_THOUSAND(10_000, "万"),
+}
 
 object LedgerLogic {
     private val zoneId: ZoneId = ZoneId.systemDefault()
     val dateFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
     val dateTimeFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
-    fun parseCurrencyToCents(text: String): Long? {
+    fun parseCurrency(text: String, unit: CurrencyUnit = CurrencyUnit.YUAN): Long? {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return 0L
-        return runCatching {
-            BigDecimal(trimmed).setScale(2, RoundingMode.HALF_UP)
-                .movePointRight(2)
-                .longValueExact()
-        }.getOrNull()
+        val value = trimmed.toLongOrNull() ?: return null
+        return value * unit.multiplier
     }
 
-    fun formatCurrency(cents: Long?): String {
-        if (cents == null) return "-"
-        val amount = BigDecimal(cents).movePointLeft(2).setScale(2, RoundingMode.HALF_UP)
-        return amount.toPlainString()
+    fun formatCurrencySmart(yuan: Long?): String {
+        if (yuan == null) return "-"
+        if (yuan == 0L) return "0"
+        val abs = kotlin.math.abs(yuan)
+        val prefix = if (yuan < 0) "-" else ""
+        return when {
+            abs % 10_000 == 0L -> "$prefix${abs / 10_000}万"
+            abs % 1_000 == 0L -> "$prefix${abs / 1_000}千"
+            else -> "$prefix${NumberFormat.getNumberInstance(Locale.getDefault()).format(abs)}元"
+        }
     }
 
     fun formatDate(millis: Long?): String {
@@ -80,11 +93,31 @@ object LedgerLogic {
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    fun isGoalReached(totalInCents: Long, targetInCents: Long?): Boolean? {
-        return targetInCents?.let { totalInCents >= it }
+    fun isGoalReached(total: Long, target: Long?): Boolean? {
+        return target?.let { total >= it }
     }
 
     fun validateExpenseCategoryCount(count: Int): Boolean = count <= 10
+
+    fun normalizeMood(mood: Int?): Int? = mood?.takeIf { it in 1..5 }
+
+    fun moodEmoji(mood: Int?): String? = when (normalizeMood(mood)) {
+        1 -> "😢"
+        2 -> "😕"
+        3 -> "😐"
+        4 -> "🙂"
+        5 -> "🤩"
+        else -> null
+    }
+
+    fun moodLabel(mood: Int?): String? = when (normalizeMood(mood)) {
+        1 -> "糟糕"
+        2 -> "一般"
+        3 -> "平稳"
+        4 -> "顺利"
+        5 -> "兴奋"
+        else -> null
+    }
 
     fun lockFeedback(failedAttempts: Int, threshold: Int = 5): LockFeedback {
         val remaining = max(threshold - failedAttempts, 0)
@@ -100,15 +133,22 @@ object LedgerLogic {
         )
     }
 
-    fun shouldGenerateBirthdayTodo(today: LocalDate, birthdayMonth: Int, birthdayDay: Int): Boolean {
-        val thisYearBirthday = runCatching { LocalDate.of(today.year, birthdayMonth, birthdayDay) }.getOrNull()
-            ?: return false
-        val targetBirthday = if (thisYearBirthday.isBefore(today)) {
-            runCatching { LocalDate.of(today.year + 1, birthdayMonth, birthdayDay) }.getOrNull() ?: return false
-        } else {
-            thisYearBirthday
+    fun isBirthdayApproaching(
+        today: LocalDate,
+        birthdayMonth: Int?,
+        birthdayDay: Int?,
+        daysAhead: Int = 30,
+    ): Boolean {
+        if (birthdayMonth == null || birthdayDay == null) return false
+        val thisYear = runCatching { LocalDate.of(today.year, birthdayMonth, birthdayDay) }.getOrNull()
+        val nextYear = runCatching { LocalDate.of(today.year + 1, birthdayMonth, birthdayDay) }.getOrNull()
+        val upcoming = when {
+            thisYear != null && !thisYear.isBefore(today) -> thisYear
+            nextYear != null -> nextYear
+            else -> return false
         }
-        return targetBirthday.minusDays(14) == today
+        val daysUntil = java.time.temporal.ChronoUnit.DAYS.between(today, upcoming)
+        return daysUntil in 0..daysAhead
     }
 
     fun recurrenceFromEntity(entity: RecurrenceRuleEntity?): RecurrenceDescriptor? {
@@ -217,21 +257,24 @@ object LedgerLogic {
     fun buildSnapshotSummaries(
         accounts: List<AccountEntity>,
         snapshots: List<SnapshotWithDetails>,
+        categories: List<ExpenseCategoryEntity>,
+        tagsBySnapshot: Map<Long, List<TagEntity>> = emptyMap(),
     ): List<SnapshotSummary> {
         val includedAccountMap = accounts.associateBy { it.id }
+        val categoryMap = categories.associateBy { it.id }
         val chronologic = snapshots.sortedBy { it.snapshot.snapshotDate }
         val totalsById = mutableMapOf<Long, Long>()
         chronologic.forEach { details ->
             totalsById[details.snapshot.id] = details.balances
                 .filter { includedAccountMap[it.accountId]?.includeInNetWorth == true }
-                .sumOf { it.amountInCents }
+                .sumOf { it.amount }
         }
         val previousById = chronologic.zipWithNext().associate { (previous, current) ->
             current.snapshot.id to (totalsById[current.snapshot.id] ?: 0L) - (totalsById[previous.snapshot.id] ?: 0L)
         }
         val previousBalances = mutableMapOf<Long, Map<Long, Long>>()
         chronologic.forEachIndexed { index, details ->
-            val prev = chronologic.getOrNull(index - 1)?.balances?.associate { it.accountId to it.amountInCents }.orEmpty()
+            val prev = chronologic.getOrNull(index - 1)?.balances?.associate { it.accountId to it.amount }.orEmpty()
             previousBalances[details.snapshot.id] = prev
         }
         return chronologic.reversed().map { details ->
@@ -240,24 +283,36 @@ object LedgerLogic {
             SnapshotSummary(
                 id = details.snapshot.id,
                 snapshotDate = details.snapshot.snapshotDate,
-                totalInCents = total,
-                changeFromPreviousInCents = previousById[details.snapshot.id],
-                targetTotalInCents = details.snapshot.targetTotalInCents,
-                goalReached = isGoalReached(total, details.snapshot.targetTotalInCents),
+                total = total,
+                changeFromPrevious = previousById[details.snapshot.id],
+                targetTotal = details.snapshot.targetTotal,
+                goalReached = isGoalReached(total, details.snapshot.targetTotal),
                 debtLabel = details.snapshot.debtLabel,
-                debtAmountInCents = details.snapshot.debtAmountInCents,
+                debtAmount = details.snapshot.debtAmount,
                 nextRecordAt = details.snapshot.nextRecordAt,
                 note = details.snapshot.note,
+                mood = normalizeMood(details.snapshot.mood),
+                tags = tagsBySnapshot[details.snapshot.id].orEmpty().map {
+                    TagSummary(id = it.id, name = it.name, archived = it.archived)
+                },
                 balances = details.balances.map { balance ->
+                    val account = includedAccountMap[balance.accountId]
+                    val baseName = account?.name ?: "账户 ${balance.accountId}"
+                    val name = if (account?.archived == true) "$baseName (已归档)" else baseName
                     AccountBalanceSummary(
                         accountId = balance.accountId,
-                        accountName = includedAccountMap[balance.accountId]?.name ?: "账户 ${balance.accountId}",
-                        amountInCents = balance.amountInCents,
-                        deltaFromPreviousInCents = previous[balance.accountId]?.let { balance.amountInCents - it },
+                        accountName = name,
+                        amount = balance.amount,
+                        deltaFromPrevious = previous[balance.accountId]?.let { balance.amount - it },
                     )
                 }.sortedBy { it.accountName },
-                expenses = details.expenses.map { ExpenseSummary(it.categoryName, it.amountInCents) }
-                    .sortedByDescending { it.amountInCents },
+                expenses = details.expenses.map { expense ->
+                    ExpenseSummary(
+                        categoryId = expense.categoryId,
+                        categoryName = categoryMap[expense.categoryId]?.name ?: "已删除",
+                        amount = expense.amount,
+                    )
+                }.sortedByDescending { it.amount },
             )
         }
     }
@@ -271,6 +326,7 @@ object LedgerLogic {
                 birthdayDay = personWithGifts.person.birthdayDay,
                 relation = personWithGifts.person.relation,
                 note = personWithGifts.person.note,
+                sortOrder = personWithGifts.person.sortOrder,
                 gifts = personWithGifts.gifts.sortedByDescending { it.date }.map {
                     GiftSummary(
                         id = it.id,
@@ -278,7 +334,7 @@ object LedgerLogic {
                         date = it.date,
                         directionLabel = if (it.direction.name == "SENT") "我送出" else "对方送我",
                         giftName = it.giftName,
-                        priceInCents = it.priceInCents,
+                        price = it.price,
                         note = it.note,
                     )
                 },
@@ -299,7 +355,6 @@ object LedgerLogic {
                 completedAt = it.todo.completedAt,
                 lastCompletedAt = it.todo.lastCompletedAt,
                 recurrence = recurrenceFromEntity(it.rule),
-                sourceType = it.todo.sourceType,
             )
         }
     }

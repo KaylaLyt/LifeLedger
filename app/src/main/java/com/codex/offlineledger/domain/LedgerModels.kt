@@ -7,37 +7,47 @@ import java.time.Month
 data class SnapshotSummary(
     val id: Long,
     val snapshotDate: Long,
-    val totalInCents: Long,
-    val changeFromPreviousInCents: Long? = null,
-    val targetTotalInCents: Long? = null,
+    val total: Long,
+    val changeFromPrevious: Long? = null,
+    val targetTotal: Long? = null,
     val goalReached: Boolean? = null,
     val debtLabel: String,
-    val debtAmountInCents: Long?,
+    val debtAmount: Long?,
     val nextRecordAt: Long?,
     val note: String,
+    val mood: Int? = null,
+    val tags: List<TagSummary> = emptyList(),
     val balances: List<AccountBalanceSummary>,
     val expenses: List<ExpenseSummary>,
+)
+
+data class TagSummary(
+    val id: Long,
+    val name: String,
+    val archived: Boolean = false,
 )
 
 data class AccountBalanceSummary(
     val accountId: Long,
     val accountName: String,
-    val amountInCents: Long,
-    val deltaFromPreviousInCents: Long? = null,
+    val amount: Long,
+    val deltaFromPrevious: Long? = null,
 )
 
 data class ExpenseSummary(
+    val categoryId: Long,
     val categoryName: String,
-    val amountInCents: Long,
+    val amount: Long,
 )
 
 data class PersonLedgerSummary(
     val id: Long,
     val name: String,
-    val birthdayMonth: Int,
-    val birthdayDay: Int,
+    val birthdayMonth: Int?,
+    val birthdayDay: Int?,
     val relation: String,
     val note: String,
+    val sortOrder: Int,
     val gifts: List<GiftSummary>,
 )
 
@@ -47,7 +57,7 @@ data class GiftSummary(
     val date: Long,
     val directionLabel: String,
     val giftName: String,
-    val priceInCents: Long,
+    val price: Long,
     val note: String,
 )
 
@@ -72,7 +82,6 @@ data class TodoSummary(
     val completedAt: Long?,
     val lastCompletedAt: Long?,
     val recurrence: RecurrenceDescriptor?,
-    val sourceType: String?,
 )
 
 enum class LockAction {

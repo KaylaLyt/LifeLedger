@@ -17,7 +17,6 @@ import androidx.work.WorkerParameters
 import com.codex.offlineledger.R
 import com.codex.offlineledger.data.AppDatabase
 import com.codex.offlineledger.data.repo.LedgerRepository
-import java.time.LocalDate
 import java.util.concurrent.TimeUnit
 
 private const val CHANNEL_ID = "offline-ledger-reminders"
@@ -31,7 +30,6 @@ class ReminderWorker(
 
     override suspend fun doWork(): Result {
         ReminderScheduler.ensureChannel(applicationContext)
-        repository.generateBirthdayTodos(LocalDate.now())
         val now = System.currentTimeMillis()
         val dueTodos = repository.dueTodoNotifications(now)
         dueTodos.forEachIndexed { index, todo ->
@@ -74,10 +72,10 @@ object ReminderScheduler {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "离线账本提醒",
+                "Todo 提醒",
                 NotificationManager.IMPORTANCE_DEFAULT,
             ).apply {
-                description = "Todo 与生日提醒"
+                description = "Todo 到期提醒"
             }
             context.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
